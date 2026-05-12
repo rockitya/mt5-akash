@@ -107,3 +107,4 @@ jobs:
         with:
           name: akash-deploy-sdl
           path: deploy.yaml
+          
