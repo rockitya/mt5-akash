@@ -1,0 +1,109 @@
+name: Build MT5 for Akash
+
+on:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}-mt5
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to the GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set lowercase image name
+        run: |
+          echo "IMAGE_LOWER=$(echo '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Generate the Dockerfile
+        run: |
+          cat << 'EOF' > Dockerfile
+          FROM ubuntu:22.04
+          ENV DEBIAN_FRONTEND=noninteractive
+          
+          RUN dpkg --add-architecture i386
+          
+          RUN apt-get update && apt-get install -y \
+              wine \
+              wine32 \
+              xvfb \
+              x11vnc \
+              websockify \
+              novnc \
+              wget \
+              && rm -rf /var/lib/apt/lists/*
+              
+          WORKDIR /app
+          COPY setup_env.sh .
+          COPY mt5-ubuntu-agents.sh .
+          RUN chmod +x *.sh
+          
+          RUN ./setup_env.sh
+          
+          CMD Xvfb :0 -screen 0 1024x768x16 & \
+              x11vnc -display :0 -forever -nopw -bg & \
+              websockify --web /usr/share/novnc/ 6080 localhost:5900 & \
+              DISPLAY=:0 wine "C:\Program Files\MetaTrader 5\terminal.exe"
+          EOF
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_LOWER }}
+
+      - name: Generate Akash SDL
+        run: |
+          cat << EOF > deploy.yaml
+          version: "2.0"
+          services:
+            mt5-terminal:
+              image: ${{ env.IMAGE_LOWER }}
+              expose:
+                - port: 6080
+                  as: 80
+                  to:
+                    - global: true
+          profiles:
+            compute:
+              mt5-terminal:
+                resources:
+                  cpu:
+                    units: 2.0
+                  memory:
+                    size: 2Gi
+                  storage:
+                    size: 10Gi
+            placement:
+              dcloud:
+                pricing:
+                  mt5-terminal:
+                    denom: uakt
+                    amount: 1000
+          deployment:
+            mt5-terminal:
+              dcloud:
+                profile: mt5-terminal
+                count: 1
+          EOF
+
+      - name: Upload Akash deploy.yaml
+        uses: actions/upload-artifact@v4
+        with:
+          name: akash-deploy-sdl
+          path: deploy.yaml
